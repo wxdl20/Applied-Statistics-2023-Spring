@@ -1,0 +1,392 @@
+---
+title: "baseball"
+output: html_document
+date: '2023-04-19'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse) # metapackage of all tidyverse packages
+library(rpart)
+library(ggforce)
+
+library(car)
+#Read in Data
+Pitches.2019 <- read.csv("./archive/2019_pitches.csv",header = TRUE)
+Pitches.1518 <- read.csv('./archive/pitches.csv',header = TRUE)
+#Pitches <- rbind(Pitches.2019 ,Pitches.1518 )
+Pitches <- Pitches.1518
+options(warn = -1)
+```
+
+```{r}
+Pitches <- Pitches %>% filter(code %in% c('C','B'))
+#Only keep variales of interest
+Pitches <- Pitches %>% select(px,pz,code,b_count,s_count,outs,on_1b,,on_2b,on_3b)
+
+#drop rows with NA Values
+Pitches <- Pitches %>% drop_na(colnames(Pitches))
+
+#calculate med x and med z value
+x.med = median(Pitches$px[Pitches$code == 'C'])
+z.med = median(Pitches$pz[Pitches$code == 'C'])
+
+#Create distance from center of Strike Zone Variable
+Pitches <- Pitches %>% mutate(distance = sqrt((Pitches$pz - z.med)^2 + (Pitches$px -x.med)^2))
+Pitches <- Pitches %>% rename(Call= code)
+
+
+
+
+#create vector of distances sorted
+ds <- sort(Pitches$distance) 
+#value for cutoff taking out the top 35% of distances from the center of the plate
+cut.off <- ds[1207899]
+
+print(summary(Pitches$distance))
+```
+```{r}
+#get rid of top 35% of distances away from the center of the plate
+Pitches <- Pitches %>% filter(distance <= cut.off)
+Pitches <- Pitches %>% mutate(full.count =as.factor(ifelse(b_count == 3 & s_count==2,1,0)))
+Pitches <- Pitches %>% mutate(Three1 =as.factor(ifelse(b_count == 3 & s_count ==1,1,0)))
+Pitches <- Pitches %>% mutate(Three0 =as.factor(ifelse(b_count == 3 & s_count ==0,1,0)))
+Pitches <- Pitches %>% mutate(Two.Outs =as.factor(ifelse( outs==2,1,0)))
+Pitches <- Pitches %>% mutate(One.Out =as.factor(ifelse( outs==1,1,0)))
+Pitches <- Pitches%>% mutate(Score.pos = as.factor(ifelse(on_2b==1 | on_3b==1,1,0)))
+Pitches <- Pitches%>% mutate(Bases.loaded = as.factor(ifelse(on_2b==1 & on_3b==1 &on_1b==1,1,0)))
+Pitches <- Pitches%>% mutate(On.First= as.factor(ifelse(on_1b==1 & on_3b==0 &on_2b==0,1,0)))
+Pitches$Call <- as.factor(sapply(Pitches$Call,function(x){ifelse(x == 'C',1,0)}))
+```
+
+```{r}
+print(sum(Pitches$Call == 1))
+print(sum(Pitches$Call == 0))
+```
+
+```{r}
+densities <- ggplot(Pitches, aes(x=distance, fill=Call)) + geom_density(alpha=0.4 ,position = 'identity') +
+                      scale_fill_manual(labels= c('Ball','Strike'),values = c('blue','red')) +
+                      ggtitle('Distributions of Distance from Center of Strike Zone for Balls and Strikes')
+                      
+print(densities)
+```
+```{r}
+strike.zone <- ggplot() + geom_point(data = Pitches[1:50000,], aes(x= px ,y= pz, color=Call
+                                                          , shape = Call)) +
+                          scale_color_manual(labels= c('Ball','Strike'),values = c('blue','red')) +
+                          scale_shape_manual(labels= c('Ball','Strike'),values = c(16,4))+
+                          xlab("X Coordinate of Pitch Location")+
+                          ylab("Z Coordinate of Pitch Location")+
+                          ylim(0.5,4.1)+
+                          xlim(-1.8,1.8)+
+                          ggtitle('Strike Zone')+coord_fixed()
+
+print(strike.zone)
+```
+
+```{r}
+BS.GreyZone <- function(df,split.var,BS.n,samp.size ){
+  
+    Strike.df <- df[which(df$Call==1),]  
+    Ball.df <- df[which(df$Call==0),]  
+    split.stor <- rep(0,BS.n)
+    
+    for (i in 1:BS.n){
+      set.seed(i)
+      index.b <- sample(1:nrow(Ball.df),samp.size,replace=F)
+      
+      set.seed((i+15))
+      index.s <- sample(1:nrow(Strike.df),samp.size,replace =F)
+      
+      bs.data <- rbind(Ball.df[index.b,],Strike.df[index.s,])
+      
+      tree = rpart(Call~distance, data=  bs.data,method = "class", maxdepth = 1)
+      
+      split.stor[i] <- tree$splits[1,4]
+      
+    }
+        
+  return(split.stor)
+  
+}
+
+#Calculate Splits
+splits <- BS.GreyZone(Pitches,'distance',5000, 30000)
+
+#histogram of splits
+hist(splits , col = 'dodgerblue',breaks = 10, main='Histogram of Bootstrap Decision Tree Distance Splits')
+
+print(summary(splits))
+```
+
+```{r}
+strike.zone <- ggplot() + geom_point(data = Pitches[1:50000,], aes(x= px ,y= pz, color=Call
+                                                                   , shape = Call)) +
+              scale_color_manual(labels= c('Ball','Strike'),values = c('blue','red')) +
+              scale_shape_manual(labels= c('Ball','Strike'),values = c(1,4))+
+              xlab("X Coordinate of Pitch Location")+
+              ylab("Z Coordinate of Pitch Location")+
+              ggtitle('Strike Zone')
+
+strike.zone <- strike.zone + geom_circle(aes(x0=x.med,y0=z.med, r=c(min(splits),max(splits))),lwd = 1) + coord_fixed()
+
+print(strike.zone)
+```
+
+```{r}
+#Create Analysis dataset filtering out 
+Pitch.Analysis <- Pitches %>% filter( distance >= min(splits) & distance <= max(splits)) %>% arrange(desc(Call))
+print(summary(Pitch.Analysis[1:71000,]$Call))
+#lower bound and upper bound of bootstrap splits
+Analysis.zone <- ggplot() + geom_point(data = Pitch.Analysis[1:37000,] , 
+                                       aes(x= px ,y= pz, color=Call, shape = Call)) +
+  scale_color_manual(labels= c('Ball','Strike'),values = c('blue','red')) +
+  scale_shape_manual(labels= c('Ball','Strike'),values = c(1,4))+
+  xlab("X Coordinate of Pitch Location")+
+  ylab("Z Coordinate of Pitch Location")+
+  ggtitle('Strike Zone')
+
+Analysis.zone <- Analysis.zone+ geom_circle(aes(x0=x.med,y0=z.med, r=c(min(splits),max(splits))),lwd = 1) + coord_fixed()
+
+print(Analysis.zone)
+```
+
+```{r}
+
+densities <- ggplot(Pitches, aes(x=distance, fill=Call)) + geom_density(alpha=0.4 ,position = 'identity') +scale_fill_manual(labels= c('Ball','Strike'),values = c('blue','red')) +
+  ggtitle('Distributions of Distance from Center of Strike Zone for Balls and Strikes')+
+  ylim(0,1.5)+geom_vline(xintercept = min(splits),colour="red", linetype = "longdash") + geom_vline(xintercept = max(splits),colour="Blue", linetype = "longdash")
+print(densities)
+```
+
+```{r}
+densities <- ggplot(Pitch.Analysis, aes(x=distance, fill=Call)) + geom_density(alpha=0.4 ,position = 'identity') +
+  scale_fill_manual(labels= c('Ball','Strike'),values = c('blue','red')) +
+  ggtitle('Distributions of Distance from Center of Strike Zone for Balls and Strikes')+
+  geom_vline(xintercept = min(splits),colour="red", linetype = "longdash") + geom_vline(xintercept = max(splits),colour="Blue", linetype = "longdash")
+print(densities)
+```
+
+```{r}
+Pitch.Analysis <- Pitch.Analysis %>% select(Call,full.count,Three1,Three0,Two.Outs,One.Out,Score.pos,Bases.loaded,On.First)
+Pitch.Analysis$Call <- as.factor(Pitch.Analysis$Call)
+
+#run model
+log.model <- glm(Call~. ,Pitch.Analysis, family = 'binomial' )
+
+#Percent Function 
+percent <- function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
+}
+
+
+
+sum.final.log <- as.data.frame(summary(log.model)$coefficients)
+sum.final.log <- sum.final.log %>% mutate(Percent.Change.Odds = percent(exp(Estimate)-1))
+
+sum.final.log$LB95 <- percent(exp(sum.final.log$Estimate - 1.96*sum.final.log$`Std. Error`)-1)                            
+sum.final.log$UB95 <- percent(exp(sum.final.log$Estimate +1.96*sum.final.log$`Std. Error`)-1)
+
+rownames(sum.final.log) <- c('Intercept','full.count','Three1','Three0','Two.Outs','One.Out','Score.Pos','Bases.loaded','On.First')
+
+print(sum.final.log[1:8,])
+
+library(xtable)
+print(xtable(sum.final.log), type="latex", file="xt.tex", include.rownames=TRUE)
+```
+
+```{r}
+Pitch.all.Analysis <- Pitches %>% select(Call,full.count,Three1,Three0,Two.Outs,One.Out,Score.pos,Bases.loaded,On.First)
+Pitch.all.Analysis$Call <- as.factor(Pitch.all.Analysis$Call)
+
+#run model
+log.model <- glm(Call~. ,Pitch.all.Analysis, family = 'binomial' )
+
+#Percent Function 
+percent <- function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
+}
+
+
+
+sum.final.log <- as.data.frame(summary(log.model)$coefficients)
+sum.final.log <- sum.final.log %>% mutate(Percent.Change.Odds = percent(exp(Estimate)-1))
+
+sum.final.log$LB95 <- percent(exp(sum.final.log$Estimate - 1.96*sum.final.log$`Std. Error`)-1)                            
+sum.final.log$UB95 <- percent(exp(sum.final.log$Estimate +1.96*sum.final.log$`Std. Error`)-1)
+
+rownames(sum.final.log) <- c('Intercept','full.count','Three1','Three0','Two.Outs','One.Out','Score.Pos','Bases.loaded','On.First')
+
+print(sum.final.log[1:6,])
+```
+
+```{r}
+Pitch.notall.Analysis <- Pitches %>% filter( distance <= min(splits) | distance >= max(splits)) %>% arrange(desc(Call)) %>%
+select(Call,full.count,Three1,Three0,Two.Outs,One.Out,Score.pos,Bases.loaded,On.First)
+Pitch.notall.Analysis$Call <- as.factor(Pitch.notall.Analysis$Call)
+
+#run model
+log.notall.model <- glm(Call~. ,Pitch.notall.Analysis, family = 'binomial' )
+
+#Percent Function 
+percent <- function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
+}
+
+
+
+sum.final.log <- as.data.frame(summary(log.notall.model)$coefficients)
+sum.final.log <- sum.final.log %>% mutate(Percent.Change.Odds = percent(exp(Estimate)-1))
+
+sum.final.log$LB95 <- percent(exp(sum.final.log$Estimate - 1.96*sum.final.log$`Std. Error`)-1)                            
+sum.final.log$UB95 <- percent(exp(sum.final.log$Estimate +1.96*sum.final.log$`Std. Error`)-1)
+
+rownames(sum.final.log) <- c('Intercept','full.count','Three1','Three0','Two.Outs','One.Out','Score.Pos','Bases.loaded','On.First')
+
+print(sum.final.log[1:6,])
+```
+
+
+```{r}
+strike.zone <- ggplot() + geom_point(data = Pitches[1:50000,], aes(x= px ,y= pz, color=Call
+                                                                   , shape = Call)) +
+              scale_color_manual(labels= c('Ball','Strike'),values = c('blue','red')) +
+              scale_shape_manual(labels= c('Ball','Strike'),values = c(16,4))+
+              xlab("X Coordinate of Pitch Location")+
+              ylab("Z Coordinate of Pitch Location")+
+              ggtitle('Strike Zone')
+
+strike.zone <- strike.zone + geom_rect(aes(xmin=-0.85,xmax=0.85,ymin=1.55,ymax=3.35),fill=NA,size=0.5,color="green")+
+geom_rect(aes(xmin=-0.95,xmax=0.95,ymin=1.45,ymax=3.45),fill=NA,size=0.5,color="green") + coord_fixed()
+
+print(strike.zone)
+```
+
+```{r}
+#Create Analysis dataset filtering out 
+Pitch2.Analysis <- Pitches %>% filter( (px>=-0.95 & px<=-0.85 & pz<=3.45 & pz>=1.45)|
+                                      (px>=0.85 & px<=0.95 & pz<=3.45 & pz>=1.45)|
+                                      (px>=-0.85 & px<=0.85 & pz<=1.45 & pz>=1.35)|
+                                      (px>=-0.85 & px<=0.85 & pz<=3.45 & pz>=3.35)
+                                      )
+#lower bound and upper bound of bootstrap splits
+Analysis2.zone <- ggplot() + geom_point(data = Pitch2.Analysis , 
+                                       aes(x= px ,y= pz, color=Call, shape = Call)) +
+  scale_color_manual(labels= c('Ball','Strike'),values = c('blue','red')) +
+  scale_shape_manual(labels= c('Ball','Strike'),values = c(1,10))+
+  xlab("X Coordinate of Pitch Location")+
+  ylab("Z Coordinate of Pitch Location")+
+  ggtitle('Strike Zone')
+
+print(Analysis2.zone)
+```
+```{r}
+print(sum(Pitch2.Analysis$Call == 1))
+print(sum(Pitch2.Analysis$Call == 0))
+```
+```{r}
+Pitch2.Analysis <- Pitch2.Analysis %>% select(Call,full.count,Three1,Three0,Two.Outs,One.Out,Score.pos,Bases.loaded,On.First)
+Pitch2.Analysis$Call <- as.factor(Pitch2.Analysis$Call)
+
+#run model
+log2.model <- glm(Call~. ,Pitch2.Analysis, family = 'binomial' )
+
+#Percent Function 
+percent <- function(x, digits = 2, format = "f", ...) {
+  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
+}
+
+
+
+sum2.final.log <- as.data.frame(summary(log2.model)$coefficients)
+sum2.final.log <- sum2.final.log %>% mutate(Percent.Change.Odds = percent(exp(Estimate)-1))
+
+sum2.final.log$LB95 <- percent(exp(sum2.final.log$Estimate - 1.96*sum2.final.log$`Std. Error`)-1)                            
+sum2.final.log$UB95 <- percent(exp(sum2.final.log$Estimate +1.96*sum2.final.log$`Std. Error`)-1)
+
+rownames(sum2.final.log) <- c('Intercept','full.count','Three1','Three0','Two.Outs','One.Out','Score.Pos','Bases.loaded','On.First')
+
+print(sum2.final.log[1:6,])
+```
+```{r}
+Pitches <- Pitches.2019
+options(warn = -1)
+Pitches <- Pitches %>% filter(code %in% c('C','B'))
+#Only keep variales of interest
+Pitches <- Pitches %>% select(px,pz,code,b_count,s_count,outs,on_1b,,on_2b,on_3b)
+
+#drop rows with NA Values
+Pitches <- Pitches %>% drop_na(colnames(Pitches))
+
+#calculate med x and med z value
+x.med = median(Pitches$px[Pitches$code == 'C'])
+z.med = median(Pitches$pz[Pitches$code == 'C'])
+
+#Create distance from center of Strike Zone Variable
+Pitches <- Pitches %>% mutate(distance = sqrt((Pitches$pz - z.med)^2 + (Pitches$px -x.med)^2))
+Pitches <- Pitches %>% rename(Call= code)
+
+
+
+
+#create vector of distances sorted
+ds <- sort(Pitches$distance) 
+#value for cutoff taking out the top 35% of distances from the center of the plate
+cut.off <- ds[200899]
+
+print(summary(Pitches$distance))
+```
+
+```{r}
+#get rid of top 35% of distances away from the center of the plate
+Pitches <- Pitches %>% filter(distance <= cut.off)
+Pitches <- Pitches %>% mutate(full.count =as.factor(ifelse(b_count == 3 & s_count==2,1,0)))
+Pitches <- Pitches %>% mutate(Three1 =as.factor(ifelse(b_count == 3 & s_count ==1,1,0)))
+Pitches <- Pitches %>% mutate(Three0 =as.factor(ifelse(b_count == 3 & s_count ==0,1,0)))
+Pitches <- Pitches %>% mutate(Two.Outs =as.factor(ifelse( outs==2,1,0)))
+Pitches <- Pitches %>% mutate(One.Out =as.factor(ifelse( outs==1,1,0)))
+Pitches <- Pitches%>% mutate(Score.pos = as.factor(ifelse(on_2b==1 | on_3b==1,1,0)))
+Pitches <- Pitches%>% mutate(Bases.loaded = as.factor(ifelse(on_2b==1 & on_3b==1 &on_1b==1,1,0)))
+Pitches <- Pitches%>% mutate(On.First= as.factor(ifelse(on_1b==1 & on_3b==0 &on_2b==0,1,0)))
+Pitches$Call <- as.factor(sapply(Pitches$Call,function(x){ifelse(x == 'C',1,0)}))
+
+Pitch.Analysis2 <- Pitches %>% arrange(desc(Call))
+Pitch.Analysis2 <- Pitch.Analysis2 %>% select(Call,full.count,Three1,Three0,Two.Outs,One.Out,Score.pos,Bases.loaded,On.First)
+Pitch.Analysis2$Call <- as.factor(Pitch.Analysis2$Call)
+```
+
+```{r}
+print(sum(Pitches$Call == 1))
+print(sum(Pitches$Call == 0))
+#Calculate Splits
+splits <- BS.GreyZone(Pitches,'distance',5000, 30000)
+
+#histogram of splits
+hist(splits , col = 'dodgerblue',breaks = 10, main='Histogram of Bootstrap Decision Tree Distance Splits')
+
+print(summary(splits))
+
+Pitch.Analysis2 <- Pitches %>% filter( distance >= min(splits) & distance <= max(splits)) %>% arrange(desc(Call))
+Pitch.Analysis2 <- Pitch.Analysis2 %>% select(Call,full.count,Three1,Three0,Two.Outs,One.Out,Score.pos,Bases.loaded,On.First)
+Pitch.Analysis2$Call <- as.factor(Pitch.Analysis2$Call)
+
+Pre <- predict.glm(log.model,newdata=Pitch.Analysis)
+
+
+prob <- 1 / (1 + exp(-Pre))
+
+pred_direction <- NULL
+pred_direction[prob > 0.5] <- 1
+pred_direction[prob <= 0.5] <- 0
+
+library(caret)
+osmatrix <- confusionMatrix(as.factor(pred_direction),
+                            as.factor(Pitch.Analysis$Call))
+osmatrix
+```
+
+
